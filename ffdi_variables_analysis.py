@@ -11,14 +11,19 @@ import numpy.ma as ma
 import cftime
 from iris.util import unify_time_units
 import geopandas as gpd
-sys.path.append('/net/home/h02/hadhy/PycharmProjects/impactstoolbox')
+sys.path.append('~/PycharmProjects/impactstoolbox')
 from impactstoolbox.tools import helper_functions as hf
-sys.path.append('/home/h02/hadhy/GitHub/wcssp_casestudies')
-import std_functions as sf
 import subprocess
 import warnings
 warnings.simplefilter('ignore')
 import pdb
+from sklearn.inspection import permutation_importance
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+import time
+
+scratchdir = "/data/scratch/andrew.hartley/"
+datadir = "/data/users/andrew.hartley/"
 
 
 def get_ens_df():
@@ -61,7 +66,7 @@ def get_ens_df():
     df = df.set_index('fut')
 
     # Now read the GWL data
-    gwl_dir = '/data/users/hadhy/ESMS/fire_paper/GlobalWarmingLevels/*/*.txt'
+    gwl_dir = f'{datadir}Projects/FFDI_Paper/GlobalWarmingLevels/*/*.txt'
     gwl_files = glob.glob(gwl_dir)
     for f in gwl_files:
         rcp = os.path.dirname(f).split('/')[-1].replace('_', '.')
@@ -100,6 +105,23 @@ def check_ens_numbers():
     print('dbl:', dbl, '; rcp2.6:', rcp2p6, '; rcp8.5:', rcp8p5)
 
 
+def periodConstraint(cube, t1, t2, greedy=False):
+    # Constrains the cube according to min and max datetimes
+    def make_time_func(t1m, t2m, greedy=False):
+        def tfunc(cell):
+            if greedy:
+                return t1m <= cell.point <= t2m
+            else:
+                return t1m <= cell.point < t2m
+        return tfunc
+
+    tfunc = make_time_func(t1, t2, greedy=greedy)
+    tconst = iris.Constraint(time=tfunc)
+    ocube = cube.extract(tconst)
+
+    return ocube
+
+
 def load_files(file_list, start_yr):
 
     if np.isnan(start_yr):
@@ -119,7 +141,7 @@ def load_files(file_list, start_yr):
                 varcubes.append(cube)
 
             varcube = varcubes.concatenate_cube()
-            varcube = sf.periodConstraint(varcube, start_dt, end_dt)
+            varcube = periodConstraint(varcube, start_dt, end_dt)
 
             cubelist.append(varcube)
             print('done')
@@ -137,7 +159,7 @@ def get_variables_by_ffdi_theshold(df, mint, maxt, ofile, country_list=['Austral
     """
 
     # Root dir of the data
-    indir = '/scratch/hadhy/fire/ffdi_input_variables/'
+    indir = f'{scratchdir}fire/ffdi_input_variables/'
 
     # Baseline start year
     bl_start_yr = 1986
@@ -154,22 +176,22 @@ def get_variables_by_ffdi_theshold(df, mint, maxt, ofile, country_list=['Austral
         print(i, row['rcp'], row['hist'], row['fut'])
         rcp = row['rcp'].replace('.', '_')
 
-        # ofile = f'/data/users/hadhy/ESMS/fire_paper/data/odf_bigdata_country_{mint}_to_{maxt}_temp{i}.csv'
+        # ofile = f'{datadir}Projects/FFDI_Paper/data/odf_bigdata_country_{mint}_to_{maxt}_temp{i}.csv'
         ofile_temp = ofile.replace('.csv', f'_temp{i}.csv')
         if os.path.isfile(ofile_temp):
             df_final = pd.read_csv(ofile_temp)
             continue
         else:
             last_ofile = ofile.replace('.csv', f'_temp{i-1}.csv')
-            # last_ofile = f'/data/users/hadhy/ESMS/fire_paper/data/odf_bigdata_country_{mint}_to_{maxt}_temp{i-1}.csv'
+            # last_ofile = f'/data/users/andrew.hartley/Projects/FFDI_Paper/data/odf_bigdata_country_{mint}_to_{maxt}_temp{i-1}.csv'
             if os.path.isfile(last_ofile):
                 df_final = pd.read_csv(last_ofile)
 
             ##########
             # Get the pre-calculated FFDI (saved as a timeseries of baseline + future, based on future ens_member_id
             print('   Loading FFDI ... ')
-            ffdi_filelist = glob.glob('/scratch/hadhy/fire/ffdi_output/'+rcp+'/ffdi_'+rcp+'_'+row['hist']+'*.nc')
-            ffdi_filelist.extend(glob.glob('/scratch/hadhy/fire/ffdi_output/'+rcp+'/ffdi_'+rcp+'_'+row['fut']+'*.nc'))
+            ffdi_filelist = glob.glob('/data/scratch/andrew.hartley/fire/ffdi_output/'+rcp+'/ffdi_'+rcp+'_'+row['hist']+'*.nc')
+            ffdi_filelist.extend(glob.glob('/data/scratch/andrew.hartley/fire/ffdi_output/'+rcp+'/ffdi_'+rcp+'_'+row['fut']+'*.nc'))
 
             # Load the files into an iris cubelist
             ffdi_cubes = iris.load(ffdi_filelist)  # includes baseline and future FFDI
@@ -194,7 +216,7 @@ def get_variables_by_ffdi_theshold(df, mint, maxt, ofile, country_list=['Austral
             all_var_cubes = {}
             for v in vars:
                 print(f"   ... {v}")
-
+                print(var_filelist)
                 # Do all the same loading things ...
                 var_cubes = iris.load(var_filelist, v)  # baseline and future variable
                 for j in range(len(var_cubes)):
@@ -273,6 +295,8 @@ def get_variables_by_ffdi_theshold(df, mint, maxt, ofile, country_list=['Austral
             # Therefore each row is a unique combination of t-x-y-gwl
             odf_wide = pd.pivot_table(dfout, values="value", index=['t', 'x', 'y', 'gwl', 'names', 'ensemble_member', 'rcp'], columns=["var"])
             odf_wide.reset_index(inplace=True)
+
+            pdb.set_trace()
             ### Probably need to sample here, in order to reduce the size of the output ###
             # odf_wide_ss = odf_wide.sample(n=10000, replace=False, axis='index', ignore_index=True)
             odf_wide_ss = odf_wide.groupby(['gwl', 'names']).sample(frac=0.001, replace=False)  # axis='index', ignore_index=True
@@ -287,6 +311,345 @@ def get_variables_by_ffdi_theshold(df, mint, maxt, ofile, country_list=['Austral
     return df_final
 
 
+def get_variables_by_ffdi_theshold_nosample(df, mint, maxt, ofile, country_list=['Australia', 'United States of America', 'Brazil']):
+    """
+    Gets a massive dataframe of FFDI value (>=12) with each variable per grid cell per day, WITHOUT SAMPLING
+    :param df: Dataframe that tells us for each ens member what the start year is for each GWL
+    :param mint: masks < mint
+    :param maxt: if no maximum, use np.inf
+    :return:
+    """
+
+    # Root dir of the data
+    indir = f'{scratchdir}fire/ffdi_input_variables/'
+
+    # Baseline start year
+    bl_start_yr = 1986
+
+    vars = ['relative_humidity', 'soil_moisture_content_top_metre', 'precipitation_in_mpersec',
+            'windspeed_in_km_per_hr', 'air_temperature']
+
+    # Make empty output dataframe
+    column_names = ['t', 'x', 'y', 'gwl', 'ensemble_member', 'rcp', 'FFDI', 'air_temperature', 'precipitation_in_mpersec', 'relative_humidity', 'soil_moisture_content_top_metre', 'windspeed_in_km_per_hr']
+    df_final = pd.DataFrame(columns=column_names)
+
+    # Loop through each row of the table (contains the RCP & future jobid)
+    for i, row in df.iterrows():
+        print(i, row['rcp'], row['hist'], row['fut'])
+        rcp = row['rcp'].replace('.', '_')
+
+        # ofile = f'{datadir}Projects/FFDI_Paper/data/odf_bigdata_country_{mint}_to_{maxt}_temp{i}.csv'
+        ofile_temp = ofile.replace('.csv', f'_temp{i}.csv')
+        ofile_ens = ofile.replace('.csv', f'_ens-{i}.csv')
+
+        if os.path.isfile(ofile_temp):
+            df_final = pd.read_csv(ofile_temp)
+            continue
+        else:
+            last_ofile = ofile.replace('.csv', f'_temp{i-1}.csv')
+            # last_ofile = f'/data/users/andrew.hartley/Projects/FFDI_Paper/data/odf_bigdata_country_{mint}_to_{maxt}_temp{i-1}.csv'
+            if os.path.isfile(last_ofile):
+                df_final = pd.read_csv(last_ofile)
+
+            ##########
+            # Get the pre-calculated FFDI (saved as a timeseries of baseline + future, based on future ens_member_id
+            print('   Loading FFDI ... ')
+            ffdi_filelist = glob.glob('/data/scratch/andrew.hartley/fire/ffdi_output/'+rcp+'/ffdi_'+rcp+'_'+row['hist']+'*.nc')
+            ffdi_filelist.extend(glob.glob('/data/scratch/andrew.hartley/fire/ffdi_output/'+rcp+'/ffdi_'+rcp+'_'+row['fut']+'*.nc'))
+
+            # Load the files into an iris cubelist
+            ffdi_cubes = iris.load(ffdi_filelist)  # includes baseline and future FFDI
+
+            # Remove some things to allow for the cube to be concatenated
+            for j in range(len(ffdi_cubes)):
+                ffdi_cubes[j].remove_coord('forecast_period')
+                ffdi_cubes[j].remove_coord('year')
+
+            # Now unify time coords and concatenate
+            unify_time_units(ffdi_cubes)
+            ffdi_cube = ffdi_cubes.concatenate_cube()
+
+            # Get the burnable mask
+            burnable = hf.get_burnable_mask(ffdi_cube)
+
+            # Now get FFDI variables
+            var_filelist = sorted(glob.glob(f"{indir}{rcp}/ffdi_input_variables_{rcp}_{row['hist']}_*"))
+            var_filelist.extend(sorted(glob.glob(f"{indir}{rcp}/ffdi_input_variables_{rcp}_{row['fut']}_*")))
+
+            # Make a dictionary of cubes for all variables  ...
+            all_var_cubes = {}
+            for v in vars:
+                print(f"   ... {v}")
+                print(var_filelist)
+                # Do all the same loading things ...
+                var_cubes = iris.load(var_filelist, v)  # baseline and future variable
+                for j in range(len(var_cubes)):
+                    for coord in ['forecast_reference_time', 'forecast_period', 'year']:
+                        try:
+                            var_cubes[j].remove_coord(coord)
+                        except:
+                            continue
+
+                unify_time_units(var_cubes)
+                all_var_cubes[v] = var_cubes.concatenate_cube()
+
+            # Time subset of ffdi and variables
+            tcon_dict = {}
+            # Baseline
+            hist_start = cftime.Datetime360Day(bl_start_yr, 1, 1)
+            hist_end = cftime.Datetime360Day(bl_start_yr + 20, 1, 1)
+            hist_tcon = iris.Constraint(time=lambda cell: hist_start <= cell.point < hist_end)
+            tcon_dict['Baseline'] = hist_tcon
+
+            # GWL 1.5C
+            gwl1p5_start = cftime.Datetime360Day(row['gwl_1_5_start'], 1, 1)
+            gwl1p5_end = cftime.Datetime360Day(row['gwl_1_5_start'] + 20, 1, 1)
+            gwl1p5_tcon = iris.Constraint(time=lambda cell: gwl1p5_start <= cell.point < gwl1p5_end)
+            tcon_dict['GWL1.5'] = gwl1p5_tcon
+
+            # GWL 2C
+            try:
+                gwl2_start = cftime.Datetime360Day(row['gwl_2_start'], 1, 1)
+                gwl2_end = cftime.Datetime360Day(row['gwl_2_start'] + 20, 1, 1)
+                gwl2_tcon = iris.Constraint(time=lambda cell: gwl2_start <= cell.point < gwl2_end)
+                tcon_dict['GWL2'] = gwl2_tcon
+            except:
+                print(f"{row['rcp']} & {row['fut']} doesn\'t reach 2C GWL")
+                pass
+
+            # GWL 4C
+            try:
+                gwl4_start = cftime.Datetime360Day(row['gwl_4_start'], 1, 1)
+                gwl4_end = cftime.Datetime360Day(row['gwl_4_start'] + 20, 1, 1)
+                gwl4_tcon = iris.Constraint(time=lambda cell: gwl4_start <= cell.point < gwl4_end)
+                tcon_dict['GWL4'] = gwl4_tcon
+            except:
+                print(f"{row['rcp']} & {row['fut']} doesn\'t reach 4C GWL")
+                pass
+
+            # Loop through the time constraints and extract all the grid cells with data
+            print(f'   Extracting time slices')
+            dfout = {}
+            for key, tcon in tcon_dict.items():
+                print(f'   ... {key}: FFDI, ')
+                # Extract the days in the time constraint
+                ffdi_tconned = ffdi_cube.extract(tcon)
+                # Mask according to the min and max thresholds
+                ffdi_tconned.data = ma.masked_where((ffdi_tconned.data < mint) | (ffdi_tconned.data >= maxt), ffdi_tconned.data)
+                # Combined burnable mask with masked data
+                burnable_allts = np.broadcast_to(ma.getmask(burnable.data), ffdi_tconned.shape)
+                fullmask = burnable_allts | ma.getmask(ffdi_tconned.data)
+                # Do the masking and convert to pandas dataframe
+                tmp = mask2df(ffdi_tconned, fullmask, 'FFDI', key, row['fut'], row['rcp'], country_list=country_list)
+
+                if isinstance(dfout, dict):
+                    dfout = tmp.copy()
+                else:
+                    dfout = pd.concat([dfout, tmp])
+
+                for k in all_var_cubes.keys():
+                    print(f"   ... {key}: {k}")
+                    var_tconned = all_var_cubes[k].extract(tcon)
+                    varout = mask2df(var_tconned, fullmask, k, key, row['fut'], row['rcp'], country_list=country_list)
+                    # varout = mask2df(var_tconned, ~ma.getmask(ffdi_tconned.data), k, key, row['fut'], row['rcp'])
+                    dfout = pd.concat([dfout, varout])
+
+                # Only do the baseline for testing
+                # break
+
+                # Therefore each row is a unique combination of t-x-y-gwl
+                odf_wide = pd.pivot_table(dfout, values="value", index=['t', 'x', 'y', 'gwl', 'names', 'ensemble_member', 'rcp'], columns=["var"])
+                odf_wide.reset_index(inplace=True)
+                ofile_ens_period = ofile_ens.replace('.csv', f'_allpts-{key}.csv')
+                print('   ... saving ensemble member data to ', ofile_ens_period)
+                odf_wide.to_csv(ofile_ens_period)
+    #
+    #         ### Probably need to sample here, in order to reduce the size of the output ###
+    #         # odf_wide_ss = odf_wide.sample(n=10000, replace=False, axis='index', ignore_index=True)
+    #         odf_wide_ss = odf_wide.groupby(['gwl', 'names']).sample(frac=0.001, replace=False)  # axis='index', ignore_index=True
+    #         # odf_wide_ss = odf_wide.groupby(['gwl', 'names']).sample(n=100, replace=True)
+    #         # Concatenate with existing output, and on to the next ensemble member
+    #         df_final = pd.concat([df_final, odf_wide_ss])
+    #         # Now save the current state of df_final to a temporary file
+    #         df_final.to_csv(ofile_temp)
+    #
+    # df_final.to_csv(ofile)
+
+    return
+
+
+def save_to_feather(df, filename="data.feather"):
+    df.to_feather(filename)
+
+
+def load_from_feather(filename="data.feather"):
+    return pd.read_feather(filename)
+
+
+def sample_data(frac=0.0001, nsamp=300, set=1, iteration=1):
+    '''
+    Loads in the big data csv, and samples it down to a more manageable size
+    Allows for many iterations of sampling to get a sense of variability
+    :param frac:
+    :param set:
+    :param iteration:
+    :return:
+    '''
+    datadir = '/data/users/andrew.hartley/Projects/FFDI_Paper/data/'
+    infiles = sorted(glob.glob(f'{datadir}odf_bigdata_3countries_12_to_inf_ens-*_allpts-Baseline.csv'))
+
+    # Sample from each Baseline file, select the same locations in the 4C file and then concatenate into one final dataframe
+    df_final = pd.DataFrame()
+    for f in infiles:
+
+        # If the same ensemble member also has a GWL4 file, then select the same grid cells from the Baseline file
+        f4c = f.replace('Baseline', 'GWL4')
+        if os.path.isfile(f4c):
+
+            print('Loading ', f)
+            feather_file = f.replace('.csv', '.feather')
+            if os.path.isfile(feather_file):
+                print('   Loading from feather file ', feather_file)
+                df = load_from_feather(feather_file)
+            else:
+                df = pd.read_csv(f)
+                print('   Saving to feather file ', feather_file)
+                save_to_feather(df, feather_file)
+
+            # df_samp = df.groupby(['x', 'y', 'names']).sample(frac=frac, replace=False)
+            # df_samp = df.groupby(['names']).sample(frac=frac, replace=False)
+            df_samp = df.groupby(['names']).sample(n=nsamp, replace=False)
+            df_final = pd.concat([df_final, df_samp])
+
+            print('Also loading ', f4c)
+            feather_file_f4c = f4c.replace('.csv', '.feather')
+            if os.path.isfile(feather_file_f4c):
+                print('   Loading from feather file ', feather_file_f4c)
+                df_4c = load_from_feather(feather_file_f4c)
+            else:
+                df_4c = pd.read_csv(f4c)
+                print('   Saving to feather file ', feather_file_f4c)
+                save_to_feather(df_4c, feather_file_f4c)
+
+            # Remove cells that are not GWL4
+            df_4c = df_4c[df_4c['gwl'] == 'GWL4']
+
+            # Following code uses the same grid cells as sampled in the Baseline file (decided against using this approach)
+            # gridcells = df_samp[['x', 'y', 'names']].drop_duplicates()
+            # # Merge to get only the same grid cells in the GWL4 dataframe
+            # df_4c_samp = pd.merge(df_4c, gridcells, on=['x', 'y', 'names'], how='inner')
+            # # Then sample to the same fraction
+            # df_4c_xybase_samp = df_4c_samp.groupby(['x', 'y', 'names']).sample(frac=frac, replace=False)
+
+            # df_4c_samp = df_4c.groupby(['names']).sample(frac=frac, replace=False)
+            df_4c_samp = df_4c.groupby(['names']).sample(n=nsamp, replace=False)
+            df_final = pd.concat([df_final, df_4c_samp])
+
+    # Do some classification ...
+    df_final['ffdi_class'] = 0
+    class12_24 = (df_final.FFDI >= 12) & (df_final.FFDI < 24)
+    df_final['ffdi_class'].loc[class12_24] = '12 <= FFDI < 24'
+    class_gt24 = (df_final.FFDI >= 24)
+    df_final['ffdi_class'].loc[class_gt24] = 'FFDI >= 24'
+
+    # Save the output
+    outfile = f'{datadir}Sampled/set{set}/sampled_bigdata_3countries_12_to_inf_sampled-n{nsamp}_set-{set}_iteration-{iteration}.csv'
+    if not os.path.isdir(os.path.dirname(outfile)):
+        os.makedirs(os.path.dirname(outfile))
+    df_final.to_csv(outfile)
+    print('Saved ', outfile)
+    return  df_final
+
+
+def get_variable_importance(df_sample):
+
+    # Only when FFDI >= 24
+
+    output = []
+    countries = ['Australia', 'Brazil', 'United States of America']  # 'South Africa',
+
+    # for ffdi_class in ['12 <= FFDI < 24', 'FFDI >= 24']:
+    for gwl in ['Baseline', "GWL4"]:
+        for country in countries:
+            print(gwl, country)
+            # Subset the big dataframe
+            # mysample = df_sample[(df_sample.names.isin([country])) & (df_sample.gwl.isin([gwl]))].sample(frac=0.1, replace=False)
+            mysample = df_sample[(df_sample.names.isin([country])) & (df_sample.gwl.isin([gwl]))]
+            # mysample['ffdi_class_int'] = 0
+            # mysample['ffdi_class_int'].loc[mysample['ffdi_class'] == 'FFDI >= 24'] = 1
+
+            # Extract training and test data
+            feature_names = ['air_temperature', 'precipitation_in_mpersec', 'relative_humidity',
+                             'soil_moisture_content_top_metre', 'windspeed_in_km_per_hr']
+            # pdb.set_trace()
+            X_features = mysample[feature_names]
+            y_classes = mysample[['FFDI']].astype(int)
+            # X_train, X_test, y_train, y_test = train_test_split(X_features, y_classes, stratify=mysample['ffdi_class_int'], random_state=42)
+            X_train, X_test, y_train, y_test = train_test_split(X_features, y_classes, random_state=42)
+
+            # Run the RF classifier
+            forest = RandomForestClassifier(random_state=0)
+            forest.fit(X_train, y_train)
+
+            # Get the variable importance using the test data
+            result = permutation_importance(forest, X_test, y_test, n_repeats=10, random_state=42, n_jobs=2)
+            forest_importances = pd.Series(result.importances_mean, index=feature_names)
+
+            # Add into a DataFrame
+            if isinstance(output, list):
+                output = pd.DataFrame(
+                    {'importances': forest_importances, 'importances_std': result.importances_std, 'country': country,
+                     'gwl': gwl})
+            else:
+                newoutput = pd.DataFrame(
+                    {'importances': forest_importances, 'importances_std': result.importances_std, 'country': country,
+                     'gwl': gwl})
+                output = pd.concat([output, newoutput])
+
+    # Now convert the index into a column
+    output = output.reset_index(inplace=False).rename(columns={'index': 'Variable'})
+    # Make columns categorical to help with plotting
+    output['Variable'] = pd.Categorical(output['Variable'], output['Variable'].unique())
+    output['country'] = pd.Categorical(output['country'], output['country'].unique())
+    output['gwl'] = pd.Categorical(output['gwl'], output['gwl'].unique())
+    # Make variable names nicer for plotting
+    lookup = {'air_temperature': 'T', 'precipitation_in_mpersec': 'Pr', 'relative_humidity': 'RH',
+              'soil_moisture_content_top_metre': 'SM', 'windspeed_in_km_per_hr': 'W'}
+    output['Variable_nice'] = 'T'
+    for k, v in lookup.items():
+        output['Variable_nice'].loc[output['Variable'] == k] = v
+
+    return output
+
+
+def sample_and_varimp(frac = 0.0001, nsamp=300, set=1, iterations=100):
+    """
+    Wrapper function to sample the big data and get variable importance
+    :param frac: fraction to sample
+    :param nsamp: number of samples per country per GWL
+    :param set: set number (for multiple sampling sets)
+    :param iterations: number of iterations to do
+    :return: big dataframe of variable importance and variances for plotting
+    """
+
+    dfout = pd.DataFrame()
+
+    for iteration in range(1, iterations+1):
+        outfile = f'/data/users/andrew.hartley/Projects/FFDI_Paper/data/Sampled/set{set}/variable_importance_ffdi_12plus_sampled-n{nsamp}_set-{set}_iteration-{iteration}.csv'
+        if not os.path.isfile(outfile):
+            print(set, frac, iteration)
+            df = sample_data(frac=frac, nsamp=nsamp, set=set, iteration=iteration)
+            varimp = get_variable_importance(df)
+            varimp.to_csv(outfile)
+            print('Saved ', outfile)
+        else:
+            varimp = pd.read_csv(outfile)
+
+        dfout = pd.concat([dfout, varimp])
+
+    return dfout
+
+
 def mask2df(cube, mask_arr, varname, gwlname, ensmem, rcp, region_name='natural_earth_v5_0_0.countries_110', country_list=['Australia', 'United States of America', 'Brazil']):
     """
     Mask the cube data using the mask, and creates a pandas dataframe using the additional metadata
@@ -297,7 +660,7 @@ def mask2df(cube, mask_arr, varname, gwlname, ensmem, rcp, region_name='natural_
     :param ensmem: ensemble members name
     :param rcp: RCP name
     :param region_name: could be 'ipcc' or anything accepted by regionmask. Options include all those available in regionmask: ['ar6.all', 'ar6.land', 'ar6.ocean', 'natural_earth_v5_0_0.countries_110', 'natural_earth_v5_0_0.countries_50', 'natural_earth_v5_0_0.countries_10','natural_earth_v5_0_0.land_110', 'natural_earth_v5_0_0.ocean_basins_50']
-    :param countries: list of countries to extract
+    :param country_list: list of countries to extract
     :return: pandas dataframe
     """
     import regionmask
@@ -317,7 +680,7 @@ def mask2df(cube, mask_arr, varname, gwlname, ensmem, rcp, region_name='natural_
     points = gpd.GeoDataFrame(geometry=gpd.points_from_xy(x=xs_out, y=ys_out), crs="EPSG:4326")
 
     if region_name == 'ipcc':
-        inshp = '/net/home/h02/hadhy/PycharmProjects/impactstoolbox/impactstoolbox/data/IPCC-WGI-reference-regions-v4.shp'
+        inshp = '~/PycharmProjects/impactstoolbox/impactstoolbox/data/IPCC-WGI-reference-regions-v4.shp'
         shp = gpd.read_file(inshp, crs="epsg:4326")
     else:
         # region_name = 'natural_earth_v5_0_0.countries_110'
@@ -357,7 +720,7 @@ def get_data_to_plot(type, bl_start_yr, df, climatology=True):
     '''
 
     # Root dir of the data
-    indir = '/scratch/hadhy/fire/ffdi_input_variables/'
+    indir = '/data/users/andrew.hartley/Projects/FFDI_Paper/ffdi_input_variables/'
     # indir = '/scratch/hadin/fire/ffdi_inputs/'
 
     # Create an empty variables
@@ -382,14 +745,14 @@ def get_data_to_plot(type, bl_start_yr, df, climatology=True):
         ##########
         # Get the pre-calculated FFDI (saved as a timeseries of baseline + future, based on future ens_member_id
         print('   Loading FFDI ... ', end='')
-        ffdi_file = '/scratch/hadhy/fire/ffdi_output_joined/'+rcp+'/ffdi_joined_'+rcp+'_'+row['fut']+'.nc'
+        ffdi_file = '/data/users/andrew.hartley/Projects/FFDI_Paper/ffdi_output_joined/'+rcp+'/ffdi_joined_'+rcp+'_'+row['fut']+'.nc'
         print(ffdi_file)
         ffdi_cube = iris.load_cube(ffdi_file) # baseline and futurev
         # Time subset of ffdi
         # NB: Even for future plots, we still need the baseline FFDI >= 24 mask
         hist_start = cftime.Datetime360Day(bl_start_yr, 1, 1)
         hist_end = cftime.Datetime360Day(bl_start_yr + 20, 1, 1)
-        hist_ffdi = sf.periodConstraint(ffdi_cube, hist_start, hist_end)
+        hist_ffdi = periodConstraint(ffdi_cube, hist_start, hist_end)
         ffdi_vh_count = hist_ffdi.collapsed('time', iris.analysis.COUNT, function=lambda values: values >= 24)
         print('done')
 
@@ -420,7 +783,7 @@ def get_data_to_plot(type, bl_start_yr, df, climatology=True):
             # Time subset of ffdi
             fut_start = cftime.Datetime360Day(row[col], 1, 1)
             fut_end = cftime.Datetime360Day(row[col] + 20, 1, 1)
-            fut_ffdi = sf.periodConstraint(ffdi_cube, fut_start, fut_end)
+            fut_ffdi = periodConstraint(ffdi_cube, fut_start, fut_end)
             print('   done')
 
         ##########
@@ -462,9 +825,9 @@ def get_data_to_plot(type, bl_start_yr, df, climatology=True):
                 {'FFDI': 'mean', 'RH': 'mean', 'Temperature': 'mean', 'Precipitation': 'mean', 'Wind_Speed': 'mean',
                  'Soil_Moisture': 'mean'})
             cell_climatologies.reset_index(inplace=True)
-            cell_climatologies.to_csv('/data/users/hadhy/ESMS/fire_paper/odf_climatology_'+str(i)+'_'+type+'.csv', index=False)
+            cell_climatologies.to_csv('/data/users/andrew.hartley/Projects/FFDI_Paper/odf_climatology_'+str(i)+'_'+type+'.csv', index=False)
         else:
-            odf.to_csv('/data/users/hadhy/ESMS/fire_paper/odf_allcells_'+str(i)+'_'+type+'.csv', index=False)
+            odf.to_csv('/data/users/andrew.hartley/Projects/FFDI_Paper/odf_allcells_'+str(i)+'_'+type+'.csv', index=False)
 
     # return cell_climatologies
 
@@ -560,9 +923,9 @@ def get_country_shapefile(cube):
     :return: cube with the countries burnt into it
     '''
 
-    fire_paper_countries = '/data/users/hadhy/Projects/LandCoverCCI/Data/fire_paper_countries.shp'
+    fire_paper_countries = 'data/fire_paper_countries.shp'
 
-    country_cube = sf.poly2cube(fire_paper_countries, 'MAPCOLOR7', cube.intersection(longitude=(-180, 180)))
+    country_cube = hf.poly2cube(fire_paper_countries, 'MAPCOLOR7', cube.intersection(longitude=(-180, 180)))
     country_cube = country_cube.intersection(longitude=(0, 360))
     country_cube.coord('longitude').circular = True
     country_cube.data = ma.masked_equal(country_cube.data, 0)
@@ -584,14 +947,14 @@ def plot_gwl_year(ensdf):
     ensdf.columns = ['rcp', 'hist', 'fut', '1.5 Degrees', '2 Degrees', '4 Degrees']
     ensdflong = pd.melt(ensdf, id_vars=['rcp', 'hist', 'fut'], value_vars=['1.5 Degrees', '2 Degrees', '4 Degrees'])
     ensdflong['Median Year'] = ensdflong['value'] + 10
-    ax = sns.boxplot(data=ensdflong, y='variable', x='Median Year', hue='rcp', whis=[0,100])
+    ax = sns.boxplot(data=ensdflong, y='variable', x='Median Year', hue='rcp', whis=[0,100], boxprops=None)
     ax = sns.stripplot(data=ensdflong, y='variable', x='Median Year', hue='rcp', palette={'rcp2.6': 'Black', 'rcp8.5': 'black'}, dodge=True, size=3)
     ax.set(xlim=(2000, 2100))
 
     handles, labels = ax.get_legend_handles_labels()
     plt.legend(handles[0:2], labels[0:2])
 
-    plt.savefig('/data/users/hadhy/ESMS/fire_paper/plots/gwls_by_rcp.png')
+    plt.savefig('/data/users/andrew.hartley/Projects/FFDI_Paper/plots/gwls_by_rcp.png')
 
 
 def plot_rh_vs_temp(df):
@@ -628,28 +991,28 @@ def plot_rh_vs_temp(df):
     [plt.setp(ax.texts, text="") for ax in g.axes.flat]
     g.set_titles(col_template='{col_name}')
     g.set_axis_labels(x_var="Temperature ($^\circ$C)", y_var="RH (%)")
-    g.savefig('/data/users/hadhy/ESMS/fire_paper/plots/temp_vs_rh_scatter.png')
+    g.savefig('/data/users/andrew.hartley/Projects/FFDI_Paper/plots/temp_vs_rh_scatter.png')
 
     g = sns.relplot(data=tmp, x='Temperature', y='Precipitation', hue='GWL',  # size=marker_size, # size='FFDI',
         size='FFDI', sizes=(1,200), style='RCP', col='Country', alpha=.5, kind='scatter')
     [plt.setp(ax.texts, text="") for ax in g.axes.flat]
     g.set_titles(col_template='{col_name}')
     g.set_axis_labels(x_var="Temperature ($^\circ$C)", y_var="Precipitation (mm.day$^{-1}$)")
-    g.savefig('/data/users/hadhy/ESMS/fire_paper/plots/temp_vs_precip_scatter.png')
+    g.savefig('/data/users/andrew.hartley/Projects/FFDI_Paper/plots/temp_vs_precip_scatter.png')
 
     g = sns.relplot(data=tmp, x='Temperature', y='Soil_Moisture', hue='GWL',  # size=marker_size, # size='FFDI',
         size='FFDI', sizes=(1,200), style='RCP', col='Country', alpha=.5, kind='scatter')
     [plt.setp(ax.texts, text="") for ax in g.axes.flat]
     g.set_titles(col_template='{col_name}')
     g.set_axis_labels(x_var="Temperature ($^\circ$C)", y_var="Soil Moisture (kg.m$^{-2}$)")
-    g.savefig('/data/users/hadhy/ESMS/fire_paper/plots/temp_vs_soilmoisture_scatter.png')
+    g.savefig('/data/users/andrew.hartley/Projects/FFDI_Paper/plots/temp_vs_soilmoisture_scatter.png')
 
     g = sns.relplot(data=tmp, x='Temperature', y='Wind_Speed', hue='GWL',  # size=marker_size, # size='FFDI',
         size='FFDI', sizes=(1,200), style='RCP', col='Country', alpha=.5, kind='scatter')
     [plt.setp(ax.texts, text="") for ax in g.axes.flat]
     g.set_titles(col_template='{col_name}')
     g.set_axis_labels(x_var="Temperature ($^\circ$C)",  y_var="Wind Speed (m.s$^{-1}$)")
-    g.savefig('/data/users/hadhy/ESMS/fire_paper/plots/temp_vs_wind_scatter.png')
+    g.savefig('/data/users/andrew.hartley/Projects/FFDI_Paper/plots/temp_vs_wind_scatter.png')
 
 
 def plot_cell_climatologies(df):
@@ -670,7 +1033,7 @@ def plot_cell_climatologies(df):
                                 jitter=0.35, alpha=0.2)
         [plt.setp(ax.texts, text="") for ax in sns_plot.axes.flat]
         sns_plot.set_titles(col_template='{col_name}')
-        sns_plot.savefig('/data/users/hadhy/ESMS/fire_paper/plots/figure_'+var+'.png')
+        sns_plot.savefig('/data/users/andrew.hartley/Projects/FFDI_Paper/plots/figure_'+var+'.png')
 
     # Violin ...
     for var in ['FFDI', 'RH', 'Temperature', 'Precipitation', 'Wind_Speed', 'Soil_Moisture']:
@@ -678,7 +1041,7 @@ def plot_cell_climatologies(df):
         sns_plot = sns.catplot(x='GWL', y=var, hue='RCP', data=df, col='Country', kind='violin', dodge=True)
         [plt.setp(ax.texts, text="") for ax in sns_plot.axes.flat]
         sns_plot.set_titles(col_template='{col_name}')
-        sns_plot.savefig('/data/users/hadhy/ESMS/fire_paper/plots/figure_'+var+'_violin.png')
+        sns_plot.savefig('/data/users/andrew.hartley/Projects/FFDI_Paper/plots/figure_'+var+'_violin.png')
 
     # Without stripplot ...
     for var in ['FFDI', 'RH', 'Temperature', 'Precipitation', 'Wind_Speed', 'Soil_Moisture']:
@@ -686,7 +1049,7 @@ def plot_cell_climatologies(df):
         sns_plot = sns.catplot(x='GWL', y=var, hue='RCP', data=df, col='Country', kind='box', whis=[0, 100])
         [plt.setp(ax.texts, text="") for ax in sns_plot.axes.flat]
         sns_plot.set_titles(col_template='{col_name}')
-        sns_plot.savefig('/data/users/hadhy/ESMS/fire_paper/plots/figure_'+var+'_nopoints.png')
+        sns_plot.savefig('/data/users/andrew.hartley/Projects/FFDI_Paper/plots/figure_'+var+'_nopoints.png')
 
     # change df to long format
     df.columns = ['CellX', 'CellY', 'Ensemble Member', 'Country', 'GWL', 'RCP', 'FFDI',
@@ -703,7 +1066,7 @@ def plot_cell_climatologies(df):
     [plt.setp(ax.texts, text="") for ax in g.axes.flat]
     g.set_titles(row_template='{row_name}', col_template='{col_name}')
     g.fig.subplots_adjust(wspace=.02, hspace=.02)
-    g.savefig('/data/users/hadhy/ESMS/fire_paper/plots/figure_allvars_withpoints.png')
+    g.savefig('/data/users/andrew.hartley/Projects/FFDI_Paper/plots/figure_allvars_withpoints.png')
 
     # All in one figure (boxplots only)
     p = sns.FacetGrid(data=dflong, col='Country', row='variable', margin_titles=True, sharex=True, sharey='row')
@@ -717,7 +1080,7 @@ def plot_cell_climatologies(df):
     # p.add_legend(loc='center right', bbox_to_anchor=(0.87, 0.47), frameon=True)
     p.add_legend(loc='center left', bbox_to_anchor=(0.76, 0.47), frameon=True)
     p.fig.subplots_adjust(wspace=0, hspace=0)
-    p.savefig('/data/users/hadhy/ESMS/fire_paper/plots/figure_allvars_nopoints.png')
+    p.savefig('/data/users/andrew.hartley/Projects/FFDI_Paper/plots/figure_allvars_nopoints.png')
 
     # All in one figure (boxplots only), RCP x-axis, GWL colours
     p = sns.FacetGrid(data=dflong, col='Country', row='variable', margin_titles=True, sharex=True, sharey='row')
@@ -731,7 +1094,7 @@ def plot_cell_climatologies(df):
     # p.add_legend(loc='center right', bbox_to_anchor=(0.87, 0.47), frameon=True)
     p.add_legend(loc='center left', bbox_to_anchor=(0.76, 0.47), frameon=True)
     p.fig.subplots_adjust(wspace=0, hspace=0)
-    p.savefig('/data/users/hadhy/ESMS/fire_paper/plots/figure_allvars_nopoints_RCP-xaxis.png')
+    p.savefig('/data/users/andrew.hartley/Projects/FFDI_Paper/plots/figure_allvars_nopoints_RCP-xaxis.png')
 
 
 def main_old():
@@ -740,22 +1103,22 @@ def main_old():
     # certain number of days. This may have introduced some erros
 
     # Get the data from MASS. Possibly a problem withe the joined data, so using the above data instead
-    if not os.path.isdir("/scratch/hadhy/fire/ffdi_output_joined/rcp2_6/"):
-        os.makedirs("/scratch/hadhy/fire/ffdi_output_joined/rcp2_6/")
-    if not os.path.isdir("/scratch/hadhy/fire/ffdi_output_joined/rcp8_5/"):
-        os.makedirs("/scratch/hadhy/fire/ffdi_output_joined/rcp8_5/")
+    if not os.path.isdir(f"{scratchdir}fire/ffdi_output_joined/rcp2_6/"):
+        os.makedirs(f"{scratchdir}fire/ffdi_output_joined/rcp2_6/")
+    if not os.path.isdir(f"{scratchdir}fire/ffdi_output_joined/rcp8_5/"):
+        os.makedirs(f"{scratchdir}fire/ffdi_output_joined/rcp8_5/")
 
-    subprocess.run(["moo", "get", "-v", "moose:/adhoc/users/inika.taylor/fire/rcp2_6_joined/*.nc", "/scratch/hadhy/fire/ffdi_output_joined/rcp2_6/"])
-    subprocess.run(["moo", "get", "-v", "moose:/adhoc/users/inika.taylor/fire/rcp8_5_joined/*.nc", "/scratch/hadhy/fire/ffdi_output_joined/rcp8_5/"])
+    subprocess.run(["moo", "get", "-v", "moose:/adhoc/users/inika.taylor/fire/rcp2_6_joined/*.nc", f"{scratchdir}fire/ffdi_output_joined/rcp2_6/"])
+    subprocess.run(["moo", "get", "-v", "moose:/adhoc/users/inika.taylor/fire/rcp8_5_joined/*.nc", f"{scratchdir}fire/ffdi_output_joined/rcp8_5/"])
 
     # Getting FFDI input variables from MASS
-    if not os.path.isdir("/scratch/hadhy/fire/ffdi_input_variables/rcp2_6/"):
-        os.makedirs("/scratch/hadhy/fire/ffdi_input_variables/rcp2_6/")
-    if not os.path.isdir("/scratch/hadhy/fire/ffdi_input_variables/rcp8_5/"):
-        os.makedirs("/scratch/hadhy/fire/ffdi_input_variables/rcp8_5/")
+    if not os.path.isdir(f"{scratchdir}fire/ffdi_input_variables/rcp2_6/"):
+        os.makedirs(f"{scratchdir}fire/ffdi_input_variables/rcp2_6/")
+    if not os.path.isdir(f"{scratchdir}fire/ffdi_input_variables/rcp8_5/"):
+        os.makedirs(f"{scratchdir}fire/ffdi_input_variables/rcp8_5/")
 
-    subprocess.run(["moo", "get", "-v", "moose:/adhoc/users/inika.taylor/fire/rcp2_6/ffdi_input_variables*.nc", "/scratch/hadhy/fire/ffdi_input_variables/rcp2_6/"])
-    subprocess.run(["moo", "get", "-v", "moose:/adhoc/users/inika.taylor/fire/rcp8_5/ffdi_input_variables*.nc", "/scratch/hadhy/fire/ffdi_input_variables/rcp8_5/"])
+    subprocess.run(["moo", "get", "-v", "moose:/adhoc/users/inika.taylor/fire/rcp2_6/ffdi_input_variables*.nc", f"{scratchdir}fire/ffdi_input_variables/rcp2_6/"])
+    subprocess.run(["moo", "get", "-v", "moose:/adhoc/users/inika.taylor/fire/rcp8_5/ffdi_input_variables*.nc", f"{scratchdir}fire/ffdi_input_variables/rcp8_5/"])
 
     # Load the ensemble jobids and GWLs
     ensdf = get_ens_df()
@@ -765,7 +1128,7 @@ def main_old():
     bl_start_yr = 1986
 
     # Get the baseline data to plot
-    csv_bl = '/data/users/hadhy/ESMS/fire_paper/data/odf_113_Baseline.csv'
+    csv_bl = '/data/users/andrew.hartley/Projects/FFDI_Paper/data/odf_113_Baseline.csv'
     if not os.path.isfile(csv_bl):
         df2p_baseline = get_data_to_plot('Baseline', bl_start_yr, ensdf)
     else:
@@ -774,21 +1137,21 @@ def main_old():
     df2p_base['RCP'] = 'Baseline'
 
     # Get GWL1.5 data to plot
-    csv_gwl1p5 = '/data/users/hadhy/ESMS/fire_paper/data/odf_113_GWL1.5.csv'
+    csv_gwl1p5 = '/data/users/andrew.hartley/Projects/FFDI_Paper/data/odf_113_GWL1.5.csv'
     if not os.path.isfile(csv_gwl1p5):
         df2p_gwl1p5 = get_data_to_plot('GWL1.5', bl_start_yr, ensdf)
     else:
         df2p_gwl1p5 = pd.read_csv(csv_gwl1p5)
 
     # Get GWL2 data to plot
-    csv_gwl2 = '/data/users/hadhy/ESMS/fire_paper/data/odf_113_GWL2.csv'
+    csv_gwl2 = '/data/users/andrew.hartley/Projects/FFDI_Paper/data/odf_113_GWL2.csv'
     if not os.path.isfile(csv_gwl2):
         df2p_gwl2 = get_data_to_plot('GWL2', bl_start_yr, ensdf)
     else:
         df2p_gwl2 = pd.read_csv(csv_gwl2)
 
     # Get GWL4 data to plot
-    csv_gwl4 = '/data/users/hadhy/ESMS/fire_paper/data/odf_113_GWL4.csv'
+    csv_gwl4 = '/data/users/andrew.hartley/Projects/FFDI_Paper/data/odf_113_GWL4.csv'
     if not os.path.isfile(csv_gwl4):
         df2p_gwl4 = get_data_to_plot('GWL4', bl_start_yr, ensdf)
     else:
@@ -804,40 +1167,49 @@ def main_old():
 def main():
 
     # Get the data from MASS. This is the actual data that we will use ...
-    if not os.path.isdir("/scratch/hadhy/fire/ffdi_output/rcp2_6/"):
-        os.makedirs("/scratch/hadhy/fire/ffdi_output/rcp2_6/")
-    if not os.path.isdir("/scratch/hadhy/fire/ffdi_output/rcp8_5/"):
-        os.makedirs("/scratch/hadhy/fire/ffdi_output/rcp8_5/")
+    if not os.path.isdir(f"{scratchdir}fire/ffdi_output/rcp2_6/"):
+        os.makedirs(f"{scratchdir}fire/ffdi_output/rcp2_6/")
+    if not os.path.isdir(f"{scratchdir}fire/ffdi_output/rcp8_5/"):
+        os.makedirs(f"{scratchdir}fire/ffdi_output/rcp8_5/")
 
-    if len(os.listdir('/scratch/hadhy/fire/ffdi_output/rcp2_6/')) < 228:
-        subprocess.run(["moo", "get", "-v", "moose:/adhoc/users/inika.taylor/fire/rcp2_6/ffdi_outputs/*.nc", "/scratch/hadhy/fire/ffdi_output/rcp2_6/"])
-    if len(os.listdir('/scratch/hadhy/fire/ffdi_output/rcp8_5/')) < 228:
-        subprocess.run(["moo", "get", "-v", "moose:/adhoc/users/inika.taylor/fire/rcp8_5/ffdi_outputs/*.nc", "/scratch/hadhy/fire/ffdi_output/rcp8_5/"])
+    if len(os.listdir(f'{scratchdir}fire/ffdi_output/rcp2_6/')) < 228:
+        subprocess.run(["moo", "get", "-v", "moose:/adhoc/users/inika.taylor/fire/rcp2_6/ffdi_outputs/*.nc", f"{scratchdir}fire/ffdi_output/rcp2_6/"])
+    if len(os.listdir(f'{scratchdir}fire/ffdi_output/rcp8_5/')) < 228:
+        subprocess.run(["moo", "get", "-v", "moose:/adhoc/users/inika.taylor/fire/rcp8_5/ffdi_outputs/*.nc", f"{scratchdir}fire/ffdi_output/rcp8_5/"])
 
     # Getting FFDI input variables from MASS
-    if not os.path.isdir("/scratch/hadhy/fire/ffdi_input_variables/rcp2_6/"):
-        os.makedirs("/scratch/hadhy/fire/ffdi_input_variables/rcp2_6/")
-    if not os.path.isdir("/scratch/hadhy/fire/ffdi_input_variables/rcp8_5/"):
-        os.makedirs("/scratch/hadhy/fire/ffdi_input_variables/rcp8_5/")
+    if not os.path.isdir(f"{scratchdir}fire/ffdi_input_variables/rcp2_6/"):
+        os.makedirs(f"{scratchdir}fire/ffdi_input_variables/rcp2_6/")
+    if not os.path.isdir(f"{scratchdir}fire/ffdi_input_variables/rcp8_5/"):
+        os.makedirs(f"{scratchdir}fire/ffdi_input_variables/rcp8_5/")
 
-    if len(os.listdir('/scratch/hadhy/fire/ffdi_input_variables/rcp2_6/')) < 798:
-        subprocess.run(["moo", "get", "-v", "moose:/adhoc/users/inika.taylor/fire/rcp2_6/ffdi_input_variables*.nc", "/scratch/hadhy/fire/ffdi_input_variables/rcp2_6/"])
-    if len(os.listdir('/scratch/hadhy/fire/ffdi_input_variables/rcp8_5/')) < 798:
-        subprocess.run(["moo", "get", "-v", "moose:/adhoc/users/inika.taylor/fire/rcp8_5/ffdi_input_variables*.nc", "/scratch/hadhy/fire/ffdi_input_variables/rcp8_5/"])
+    if len(os.listdir(f'{scratchdir}fire/ffdi_input_variables/rcp2_6/')) < 798:
+        subprocess.run(["moo", "get", "-v", "moose:/adhoc/users/inika.taylor/fire/rcp2_6/ffdi_input_variables*.nc", f"{scratchdir}fire/ffdi_input_variables/rcp2_6/"])
+    if len(os.listdir(f'{scratchdir}fire/ffdi_input_variables/rcp8_5/')) < 798:
+        subprocess.run(["moo", "get", "-v", "moose:/adhoc/users/inika.taylor/fire/rcp8_5/ffdi_input_variables*.nc", f"{scratchdir}fire/ffdi_input_variables/rcp8_5/"])
 
     # Load the ensemble jobids and GWLs
     ensdf = get_ens_df()
+    # ensdf_4c = ensdf[~ensdf.gwl_4_start.isnull()]
+    ensdf_lastbit = ensdf.iloc[100:]
     # plot_gwl_year(ensdf)
 
     # Get all data to plot
     countries_3 = ['Australia', 'United States of America', 'Brazil']
     countries_4 = ['Australia', 'United States of America', 'Brazil', 'South Africa']
     ## 3 countries
-    df_12_24 = get_variables_by_ffdi_theshold(ensdf, 12, 24, ofile='/data/users/hadhy/ESMS/fire_paper/data/odf_bigdata_3countries_12_to_24.csv', country_list=countries_3)
-    df_gt_24 = get_variables_by_ffdi_theshold(ensdf, 24, np.inf, ofile='/data/users/hadhy/ESMS/fire_paper/data/odf_bigdata_3countries_gt_24.csv', country_list=countries_3)
-    ## 4 countries
-    df_12_24 = get_variables_by_ffdi_theshold(ensdf, 12, 24, ofile='/data/users/hadhy/ESMS/fire_paper/data/odf_bigdata_4countries_12_to_24.csv', country_list=countries_4)
-    df_gt_24 = get_variables_by_ffdi_theshold(ensdf, 24, np.inf, ofile='/data/users/hadhy/ESMS/fire_paper/data/odf_bigdata_4countries_gt_24.csv', country_list=countries_4)
+    # Run this for the majority of plots ...
+    # df_12_inf = get_variables_by_ffdi_theshold_nosample(ensdf_lastbit, 12, np.inf, ofile='/data/users/andrew.hartley/Projects/FFDI_Paper/data/odf_bigdata_3countries_12_to_inf.csv', country_list=countries_3)
+
+    # df_12_24 = get_variables_by_ffdi_theshold(ensdf, 12, 24, ofile='/data/users/andrew.hartley/Projects/FFDI_Paper/data/odf_bigdata_3countries_12_to_24.csv', country_list=countries_3)
+    # df_gt_24 = get_variables_by_ffdi_theshold(ensdf, 24, np.inf, ofile='/data/users/andrew.hartley/Projects/FFDI_Paper/data/odf_bigdata_3countries_gt_24.csv', country_list=countries_3)
+    # ## 4 countries
+    # df_12_24 = get_variables_by_ffdi_theshold(ensdf, 12, 24, ofile='/data/users/andrew.hartley/Projects/FFDI_Paper/data/odf_bigdata_4countries_12_to_24.csv', country_list=countries_4)
+    # df_gt_24 = get_variables_by_ffdi_theshold(ensdf, 24, np.inf, ofile='/data/users/andrew.hartley/Projects/FFDI_Paper/data/odf_bigdata_4countries_gt_24.csv', country_list=countries_4)
+
+    # Run this for sampling and testing variable importance
+    # sample_and_varimp()
+    sample_and_varimp(nsamp=300, set=2, iterations=1000)
 
 
 if __name__ == '__main__':
